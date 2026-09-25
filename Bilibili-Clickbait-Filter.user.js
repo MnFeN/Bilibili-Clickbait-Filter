@@ -1,8 +1,13 @@
 // ==UserScript==
 // @name         B站营销号过滤
 // @namespace    MnFeN
-// @version      0.1.1
-// @description  筛选首页及相关视频，支持 UP 主、关键词黑白名单和调试模式
+// @version      1.0.0
+// @description  从 B 站推荐视频中过滤营销号，支持自定义筛选逻辑、设置 UP 主及关键词黑白名单
+// @author       MnFeN
+// @homepageURL  https://github.com/MnFeN/Bilibili-Clickbait-Filter
+// @supportURL   https://github.com/MnFeN/Bilibili-Clickbait-Filter/issues
+// @updateURL    https://raw.githubusercontent.com/MnFeN/Bilibili-Clickbait-Filter/main/Bilibili-Clickbait-Filter.user.js
+// @downloadURL  https://raw.githubusercontent.com/MnFeN/Bilibili-Clickbait-Filter/main/Bilibili-Clickbait-Filter.user.js
 // @match        https://www.bilibili.com/*
 // @match        https://space.bilibili.com/*
 // @noframes
