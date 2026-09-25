@@ -1294,7 +1294,7 @@
 
     // 首页、相关视频、当前 UP 主共用。
     // 放行返回空字符串；请求失败抛出异常。
-    async function getMarketingReason(mid, context = {}) {
+    async function getClickbaitReason(mid, context = {}) {
         const explicit = userRule(mid);
 
         if (explicit)
@@ -1397,7 +1397,7 @@
                 promptedUploaders.has(mid) ||
                 userRule(mid)?.list === 'white') return;
 
-            const reason = await getMarketingReason(mid, {
+            const reason = await getClickbaitReason(mid, {
                 name,
                 title,
                 video,
@@ -1512,7 +1512,7 @@
         const previous = marked.get(title);
 
         previous?.label?.remove();
-        previous?.target.classList.remove('MnFeN-marketing-hidden');
+        previous?.target.classList.remove('MnFeN-clickbait-hidden');
         title.classList.remove('MnFeN-frequency-title');
 
         marked.delete(title);
@@ -1526,7 +1526,7 @@
             previous.reason === reason &&
             previous.target === target) {
             if (!config.debug) {
-                target.classList.add('MnFeN-marketing-hidden');
+                target.classList.add('MnFeN-clickbait-hidden');
                 return;
             }
 
@@ -1551,7 +1551,7 @@
             title.prepend(label);
             title.classList.add('MnFeN-frequency-title');
         } else {
-            target.classList.add('MnFeN-marketing-hidden');
+            target.classList.add('MnFeN-clickbait-hidden');
         }
 
         marked.set(title, { identity, reason, target, label });
@@ -1609,7 +1609,7 @@
                 ? PRIORITY.HIGH
                 : PRIORITY.LOW;
 
-            getMarketingReason(info.mid, {
+            getClickbaitReason(info.mid, {
                 name: info.name,
                 title: info.caption,
                 video: info.video,
@@ -1687,7 +1687,7 @@
             .MnFeN-frequency-title * {
                 color: #e53935 !important;
             }
-            .MnFeN-marketing-hidden {
+            .MnFeN-clickbait-hidden {
                 display: none !important;
             }
         `;
