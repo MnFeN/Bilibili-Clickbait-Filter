@@ -16,10 +16,11 @@
 - 安装并进入 B 站主页后，在浏览器顶部点击篡改猴图标打开配置界面：
 
 <p align="center">
-  <img width="500" alt="篡改猴配置入口" src="https://github.com/user-attachments/assets/f0932ad9-1ded-4263-8008-4f1dcb2d1df1">
+  <img width="500" alt="篡改猴配置入口" src="https://github.com/user-attachments/assets/e734e30b-b531-4367-af1c-5d56082149c9">
 </p>
 
-- 配置界面中可以调整各项筛选策略，及设置 UP 主、关键词的黑白名单。  
+- 配置界面中可以调整各项筛选策略，及设置 UP 主、关键词的黑白名单。
+  
   每项右侧问号标记处悬停鼠标可见详细说明。
 
 <p align="center">
