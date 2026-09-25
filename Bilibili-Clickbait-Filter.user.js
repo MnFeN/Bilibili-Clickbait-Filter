@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站营销号过滤
 // @namespace    MnFeN
-// @version      0.1.0
+// @version      0.1.1
 // @description  筛选首页及相关视频，支持 UP 主、关键词黑白名单和调试模式
 // @match        https://www.bilibili.com/*
 // @match        https://space.bilibili.com/*
@@ -126,7 +126,7 @@
             key: 'allowFollowing',
             group: 'allow',
             text: '我关注的 UP 主',
-            help: '若当前登录账号已经关注该 UP 主，则放行。\n通过 UP 主资料接口中的 is_followed 判断，并与下方认证、大会员判据共用同一次资料请求。'
+            help: '若当前登录账号已经关注该 UP 主，则放行。'
         },
         {
             key: 'allowOfficial',
@@ -1305,6 +1305,7 @@
             title = null,
             video = null,
             views = null,
+            following = null,
             priority = PRIORITY.NORMAL
         } = context;
 
@@ -1317,6 +1318,9 @@
 
         const black = findKeyword('black', name, title);
         if (black) return black;
+
+        if (config.allowFollowing && following === true)
+            return '';
 
         if (config.views.enabled && video) {
             if (views === null) {
@@ -1466,6 +1470,13 @@
         if (!caption || !name) return null;
 
         const views = cardViews(card, layout);
+        const following = layout === HOME &&
+            card.querySelector(
+                '.bili-video-card__info--bottom > .bili-video-card__info--icon-text'
+            )?.textContent.trim() === '已关注'
+                ? true
+                : null;
+
         const mid = midMatch[1];
         const video = videoMatch[1];
         let target = card;
@@ -1485,7 +1496,15 @@
             name,
             caption,
             views,
-            identity: JSON.stringify([mid, video, name, caption, views])
+            following,
+            identity: JSON.stringify([
+                mid,
+                video,
+                name,
+                caption,
+                views,
+                following
+            ])
         };
     }
 
@@ -1595,6 +1614,7 @@
                 title: info.caption,
                 video: info.video,
                 views: info.views,
+                following: info.following,
                 priority
             }).then(reason => {
                 decisions.set(key, reason);
