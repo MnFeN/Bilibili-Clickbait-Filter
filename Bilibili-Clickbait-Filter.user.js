@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站营销号过滤
 // @namespace    MnFeN
-// @version      0.0.0
+// @version      0.1.0
 // @description  筛选首页及相关视频，支持 UP 主、关键词黑白名单和调试模式
 // @match        https://www.bilibili.com/*
 // @match        https://space.bilibili.com/*
@@ -14,6 +14,40 @@
 // @connect      api.bilibili.com
 // ==/UserScript==
 
+/*
+ * API 使用与实测备注（2026-09-25；耗时会随网络、账号与 B 站服务状态波动）：
+ *
+ * 1. /x/web-interface/nav
+ *    用途：取得 WBI 签名密钥。
+ *    单线程响应约 250 ms；调用频率很低，脚本内会缓存签名密钥。
+ *
+ * 2. /x/space/wbi/arc/search
+ *    用途：取得 UP 主最近投稿，判断投稿频率、隐藏投稿、转载等。
+ *    单线程响应约 800 ms（浮动较大），是当前主要耗时接口。
+ *
+ * 3. /x/web-interface/view
+ *    用途：主动访问视频页时取得视频、UP 主及播放量等详情。
+ *    单线程响应约 470 ms；首页/相关推荐优先直接读取 DOM，避免额外调用。
+ *
+ * 4. /x/space/wbi/acc/info
+ *    用途：取得 UP 主完整资料；当前用于“我关注的 UP 主”、官方认证、
+ *          专业/机构认证、年度大会员等放行判据。
+ *    单线程响应约 300 ms。
+ *    实测连续高频请求约 100 次后可能触发 code -352（风控校验失败）；
+ *    与 card 的风控计数互不影响，通常等待数分钟后恢复，阈值和恢复时间并非固定。
+ *
+ * 5. /x/web-interface/card
+ *    用途：取得 UP 主名称及粉丝数。
+ *    单线程响应约 270 ms。
+ *    实测连续高频请求约 100 次后可能触发 code -352；
+ *    与 acc/info 的风控计数互不影响，通常等待数分钟后恢复，阈值和恢复时间并非固定。
+ *
+ * 调度：
+ * - 全局请求默认最多并发 2 个。实测超过 2 个并发时吞吐提升很小，主要增加单请求延迟。
+ * - 当前正在浏览的 UP 主、当前视口内的视频卡片优先；
+ *   屏幕外卡片降低优先级；已经进入最终放行判断的 acc/info / card 请求会适当提权。
+ */
+
 (function () {
     'use strict';
 
@@ -23,20 +57,29 @@
     const DEFAULTS = {
         filterHome: true,
         filterRelated: true,
+        promptWhitelist: true,
+
         frequency: { enabled: true, count: 10, hours: 120 },
         hidden: { enabled: true, count: 3 },
+
         allowRepost: true,
         allowFollowing: true,
+        allowOfficial: true,
+        allowAttestation: true,
+        allowAnnualVip: false,
         views: { enabled: false, count: 1000000 },
         followers: { enabled: true, count: 1000000 },
-        promptWhitelist: true,
-        concurrency: 5,
+
+        concurrency: 2,
         debug: false,
+
         uploaders: [],
         keywords: []
     };
 
+    // 按设置页页码、同页从上到下排列。
     const FIELDS = [
+        // 过滤规则页：通用
         {
             key: 'filterHome',
             group: 'general',
@@ -49,6 +92,14 @@
             text: '过滤视频页右侧推荐',
             help: '筛选 B 站视频页右侧的相关视频推荐。'
         },
+        {
+            key: 'promptWhitelist',
+            group: 'general',
+            text: '访问被屏蔽的 UP 主时询问加入白名单',
+            help: '由于脚本逻辑可能存在误伤，主动打开视频或个人主页时做出相应补救：\n如果屏蔽规则检查到你正在浏览的 UP 主被判断为营销号，弹窗询问是否加入白名单。'
+        },
+
+        // 过滤规则页：屏蔽
         {
             key: 'frequency',
             group: 'block',
@@ -63,6 +114,8 @@
             inputs: { count: [1, 10] },
             help: '有一部分营销号会将视频设置为主页不可见，规避限流等风险。\n此规则用于筛除这部分账号，关闭前面的跨度规则不影响本行。'
         },
+
+        // 过滤规则页：放行
         {
             key: 'allowRepost',
             group: 'allow',
@@ -72,35 +125,49 @@
         {
             key: 'allowFollowing',
             group: 'allow',
-            text: '自己关注的 UP 主',
-            help: '若当前登录账号已经关注该 UP 主，则放行。\n仅在其他自动判据已经判断应屏蔽后查询关注关系，减少额外接口请求。'
+            text: '我关注的 UP 主',
+            help: '若当前登录账号已经关注该 UP 主，则放行。\n通过 UP 主资料接口中的 is_followed 判断，并与下方认证、大会员判据共用同一次资料请求。'
+        },
+        {
+            key: 'allowOfficial',
+            group: 'allow',
+            text: '官方认证账号',
+            help: '若账号具有有效的 B 站官方认证，则放行。\n例：知名创作者、某领域认证账号、某网站官方账号。\n\n由于 B 站 API 对此项查询频率的限制较严格，\n仅在由其他判据判断应屏蔽此视频后查询此项。\n如果看到了弹窗提示 API 请求遇到风控，可以关闭这一选项。'
+        },
+        {
+            key: 'allowAttestation',
+            group: 'allow',
+            text: '专业/机构认证账号',
+            help: '若账号具有专业或机构认证，则放行。\n例：bilibili 机构认证-媒体。\n\n由于 B 站 API 对此项查询频率的限制较严格，\n仅在由其他判据判断应屏蔽此视频后查询此项。\n如果看到了弹窗提示 API 请求遇到风控，可以关闭这一选项。'
+        },
+        {
+            key: 'allowAnnualVip',
+            group: 'allow',
+            text: '开通年度大会员',
+            help: '若账号当前为有效的年度大会员，则放行。\n实测很多营销号同样会开启年度大会员，因此区分度有限，不建议开启。\n\n由于 B 站 API 对此项查询频率的限制较严格，\n仅在由其他判据判断应屏蔽此视频后查询此项。\n如果看到了弹窗提示 API 请求遇到风控，可以关闭这一选项。'
         },
         {
             key: 'views',
             group: 'allow',
             text: '当前视频播放量不低于 {count}',
             inputs: { count: [0] },
-            help: '若播放量较高，则判断该视频有一定价值，放行当前视频。'
+            help: '若播放量较高，则判断该视频有一定价值，考虑放行当前视频。'
         },
         {
             key: 'followers',
             group: 'allow',
             text: 'UP 主粉丝数高于 {count}',
             inputs: { count: [0] },
-            help: '若 UP 主粉丝量较高，则判断该视频有一定价值，放行当前视频。\n\n由于 B 站 API 对粉丝数查询频率的限制较严格，\n仅在由其他判据判断应屏蔽此视频后查询此项。\n如果看到了弹窗提示 API 请求遇到风控，可以关闭这一选项。'
+            help: '若 UP 主粉丝量较高，则判断该视频有一定价值，考虑放行当前视频。\n\n由于 B 站 API 对粉丝数查询频率的限制较严格，\n仅在由其他判据判断应屏蔽此视频后查询此项。\n如果看到了弹窗提示 API 请求遇到风控，可以关闭这一选项。'
         },
-        {
-            key: 'promptWhitelist',
-            group: 'general',
-            text: '访问被屏蔽的 UP 主时询问加入白名单',
-            help: '由于脚本逻辑可能存在误伤，主动打开视频或个人主页时做出相应补救：\n如果屏蔽规则检查到你正在浏览的 UP 主被判断为营销号，弹窗询问是否加入白名单。'
-        },
+
+        // 高级页
         {
             key: 'concurrency',
             group: 'advanced',
             text: '最多同时请求 {value} 个接口',
             inputs: { value: [1] },
-            help: '所有接口共用此并发上限。\n默认 5，不设置请求间隔。'
+            help: '所有接口共用此并发上限。\n默认 2；实测继续提高并发通常不会明显增加吞吐量，反而会拖慢单个请求。'
         },
         {
             key: 'debug',
@@ -140,15 +207,22 @@
         regex: parseRegex(rule.pattern)
     }));
 
+    const PRIORITY = {
+        HIGH: 0,
+        NORMAL: 1,
+        LOW: 2
+    };
+
     const queue = [];
     const uploads = new Map();
     const uploaderCards = new Map();
+    const uploaderInfos = new Map();
     const details = new Map();
-    const relations = new Map();
     const decisions = new Map();
     const marked = new Map();
     const promptedUploaders = new Set();
 
+    let queueSequence = 0;
     let active = 0;
     let updateTimer;
     let started = false;
@@ -793,9 +867,23 @@
         };
     }
 
-    function request(path, query = '') {
+    function request(path, query = '', priority = PRIORITY.NORMAL) {
         return new Promise((resolve, reject) => {
-            queue.push({ path, query, resolve, reject });
+            queue.push({
+                path,
+                query,
+                priority,
+                sequence: queueSequence++,
+                resolve,
+                reject
+            });
+
+            // 优先级数值越小越优先；同优先级保持 FIFO。
+            queue.sort((a, b) =>
+                a.priority - b.priority ||
+                a.sequence - b.sequence
+            );
+
             pump();
         });
     }
@@ -812,6 +900,12 @@
                     pump();
                 });
         }
+    }
+
+    function promotePriority(priority) {
+        return priority === PRIORITY.LOW
+            ? PRIORITY.NORMAL
+            : PRIORITY.HIGH;
     }
 
     function send(path, query) {
@@ -933,7 +1027,7 @@
     }
 
     async function getSigningKey() {
-        const response = await request('/x/web-interface/nav');
+        const response = await request('/x/web-interface/nav', '', PRIORITY.HIGH);
         const images = response.data?.wbi_img;
 
         if (!images?.img_url || !images?.sub_url)
@@ -971,19 +1065,23 @@
         return cache.get(key);
     }
 
-    function getUploads(mid) {
+    function getUploads(mid, priority = PRIORITY.NORMAL) {
         return memo(uploads, mid, async () => {
             const key = await prepareKey();
             if (!key) throw new Error('WBI 密钥不可用');
 
-            const data = checkResponse(await request('/x/space/wbi/arc/search', sign({
-                mid,
-                pn: 1,
-                ps: 10,
-                order: 'pubdate',
-                tid: 0,
-                keyword: ''
-            }, key)));
+            const data = checkResponse(await request(
+                '/x/space/wbi/arc/search',
+                sign({
+                    mid,
+                    pn: 1,
+                    ps: 10,
+                    order: 'pubdate',
+                    tid: 0,
+                    keyword: ''
+                }, key),
+                priority
+            ));
 
             const videos = data?.list?.vlist;
             const count = data?.page?.count;
@@ -1003,17 +1101,36 @@
         });
     }
 
-    function getUploaderCard(mid) {
+    function getUploaderInfo(mid, priority = PRIORITY.NORMAL) {
+        return memo(uploaderInfos, mid, async () => {
+            const key = await prepareKey();
+            if (!key) throw new Error('WBI 密钥不可用');
+
+            const data = checkResponse(await request(
+                '/x/space/wbi/acc/info',
+                sign({ mid }, key),
+                priority
+            ));
+
+            if (!data || String(data.mid ?? '') !== String(mid))
+                throw new Error('UP 主资料无效');
+
+            return data;
+        });
+    }
+
+    function getUploaderCard(mid, priority = PRIORITY.NORMAL) {
         return memo(uploaderCards, mid, async () =>
             checkResponse(await request(
                 '/x/web-interface/card',
-                new URLSearchParams({ mid }).toString()
+                new URLSearchParams({ mid }).toString(),
+                priority
             ))
         );
     }
 
-    async function getFollowers(mid) {
-        const data = await getUploaderCard(mid);
+    async function getFollowers(mid, priority = PRIORITY.NORMAL) {
+        const data = await getUploaderCard(mid, priority);
         const count = data?.follower ?? data?.card?.fans;
 
         if (!Number.isSafeInteger(count) || count < 0)
@@ -1022,24 +1139,20 @@
         return count;
     }
 
-    function isFollowing(mid) {
-        return memo(relations, mid, async () => {
-            const data = checkResponse(await request(
-                '/x/web-interface/relation',
-                new URLSearchParams({ mid }).toString()
-            ));
+    async function getUploaderName(mid, priority = PRIORITY.NORMAL) {
+        // 若之前已经查询过 acc/info，直接复用其中的名称，避免额外 card 请求。
+        const infoPromise = uploaderInfos.get(mid);
 
-            const attribute = data?.relation?.attribute;
+        if (infoPromise) {
+            try {
+                const info = await infoPromise;
 
-            if (!Number.isSafeInteger(attribute))
-                throw new Error('关注关系无效');
+                if (typeof info?.name === 'string' && info.name.trim())
+                    return info.name.trim();
+            } catch (_) {}
+        }
 
-            return attribute === 2 || attribute === 6;
-        });
-    }
-
-    async function getUploaderName(mid) {
-        const data = await getUploaderCard(mid);
+        const data = await getUploaderCard(mid, priority);
 
         if (typeof data?.card?.name !== 'string' || !data.card.name.trim())
             throw new Error('未返回 UP 主名称');
@@ -1047,7 +1160,7 @@
         return data.card.name.trim();
     }
 
-    function getVideo(video) {
+    function getVideo(video, priority = PRIORITY.NORMAL) {
         return memo(details, video, async () => {
             const params = video.startsWith('BV')
                 ? { bvid: video }
@@ -1055,7 +1168,8 @@
 
             const data = checkResponse(await request(
                 '/x/web-interface/view',
-                new URLSearchParams(params).toString()
+                new URLSearchParams(params).toString(),
+                priority
             ));
 
             if (!sameVideo(data, video))
@@ -1071,6 +1185,32 @@
 
     function userRule(mid) {
         return config.uploaders.find(item => item.uid === mid);
+    }
+
+    function hasOfficial(info) {
+        return Number.isInteger(info?.official?.type) &&
+            info.official.type >= 0;
+    }
+
+    function hasAttestation(info) {
+        return Number(info?.attestation?.type) > 0 ||
+            !!info?.attestation?.common_info?.prefix?.trim();
+    }
+
+    function hasAnnualVip(info) {
+        return Number(info?.vip?.type) === 2 &&
+            Number(info?.vip?.status) === 1;
+    }
+
+    function isInViewport(element) {
+        if (!element?.isConnected) return false;
+
+        const rect = element.getBoundingClientRect();
+
+        return rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth;
     }
 
     function findKeyword(list, name, title) {
@@ -1164,13 +1304,14 @@
             name = null,
             title = null,
             video = null,
-            views = null
+            views = null,
+            priority = PRIORITY.NORMAL
         } = context;
 
         if (findKeyword('white', name, title)) return '';
 
         if (!name && keywords.some(rule => rule.scope !== 'title')) {
-            name = await getUploaderName(mid);
+            name = await getUploaderName(mid, priority);
             if (findKeyword('white', name, title)) return '';
         }
 
@@ -1189,7 +1330,7 @@
         if (!config.frequency.enabled && (!config.hidden.enabled || !video))
             return '';
 
-        const listing = await getUploads(mid);
+        const listing = await getUploads(mid, priority);
 
         if (config.allowRepost &&
             listing.videos.some(item => Number(item.copyright) === 2)) {
@@ -1199,12 +1340,32 @@
         const reason = automaticReason(listing, video);
         if (!reason) return '';
 
-        if (config.allowFollowing && await isFollowing(mid))
-            return '';
+        // 已经进入最终放行判断：对 acc/info / card 适当提权，
+        // 让当前可见卡片和即将得出结论的任务更快完成。
+        const finalPriority = promotePriority(priority);
 
-        // 粉丝数是最后一道检查。
+        if (config.allowFollowing ||
+            config.allowOfficial ||
+            config.allowAttestation ||
+            config.allowAnnualVip) {
+            const info = await getUploaderInfo(mid, finalPriority);
+
+            if (config.allowFollowing && info.is_followed === true)
+                return '';
+
+            if (config.allowOfficial && hasOfficial(info))
+                return '';
+
+            if (config.allowAttestation && hasAttestation(info))
+                return '';
+
+            if (config.allowAnnualVip && hasAnnualVip(info))
+                return '';
+        }
+
+        // 粉丝数是最后一道检查，尽量减少 card 调用次数。
         if (config.followers.enabled &&
-            await getFollowers(mid) > config.followers.count) {
+            await getFollowers(mid, finalPriority) > config.followers.count) {
             return '';
         }
 
@@ -1220,7 +1381,7 @@
             let views = null;
 
             if (video) {
-                const data = await getVideo(video);
+                const data = await getVideo(video, PRIORITY.HIGH);
 
                 mid = String(data.owner?.mid ?? '');
                 name = data.owner?.name || '';
@@ -1236,7 +1397,8 @@
                 name,
                 title,
                 video,
-                views
+                views,
+                priority: PRIORITY.HIGH
             });
 
             if (!reason ||
@@ -1396,7 +1558,14 @@
             }
         }
 
-        for (const info of cards.values()) {
+        // 可见卡片先进入判断流程；屏幕外卡片排到后面。
+        const orderedCards = [...cards.values()]
+            .sort((a, b) =>
+                Number(!isInViewport(a.target)) -
+                Number(!isInViewport(b.target))
+            );
+
+        for (const info of orderedCards) {
             if (userRule(info.mid)?.list === 'white') {
                 if (marked.has(info.title)) clearMark(info.title);
                 continue;
@@ -1417,11 +1586,16 @@
 
             decisions.set(key, null);
 
+            const priority = isInViewport(info.target)
+                ? PRIORITY.HIGH
+                : PRIORITY.LOW;
+
             getMarketingReason(info.mid, {
                 name: info.name,
                 title: info.caption,
                 video: info.video,
-                views: info.views
+                views: info.views,
+                priority
             }).then(reason => {
                 decisions.set(key, reason);
                 scheduleUpdate();
